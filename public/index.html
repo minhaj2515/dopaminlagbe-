@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Video Editor</title>
+    <style>
+        body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; padding: 50px; background: #f4f4f4; }
+        .card { background: white; padding: 30px; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); width: 350px;}
+        .btn { margin-top: 15px; padding: 10px 20px; cursor: pointer; border: none; border-radius: 4px; width: 100%; font-weight: bold;}
+        .process { background: #007bff; color: white; }
+        .process:disabled { background: #cccccc; cursor: not-allowed; }
+        .download { background: #28a745; color: white; display: none; margin-top: 15px; text-align: center; text-decoration: none;}
+        
+        #progressContainer { display: none; margin-top: 20px; width: 100%; }
+        progress { width: 100%; height: 20px; }
+        #status { margin-top: 10px; font-size: 14px; text-align: center;}
+        
+        #trimControls { display: none; background: #f9f9f9; border: 1px solid #ddd; padding: 15px; border-radius: 6px; margin-bottom: 15px; margin-top: 10px;}
+        .time-inputs { display: flex; justify-content: space-between; margin-top: 8px;}
+        
+        /* Made the inputs a bit wider to fit HH:MM:SS */
+        .time-inputs input { width: 90px; padding: 5px; border: 1px solid #ccc; border-radius: 4px; text-align: center; font-family: monospace;}
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h2 style="margin-top: 0;">Video Editor</h2>
+        
+        <label>Main Video:</label><br>
+        <input type="file" id="videoInput" accept="video/*"><br>
+        
+        <div id="trimControls">
+            <label style="font-weight: bold; font-size: 14px;">Trim Video (HH:MM:SS)</label>
+            <div class="time-inputs">
+                <div>
+                    <label style="font-size: 12px; color: #555;">Start Time</label><br>
+                    <input type="text" id="startTime" value="00:00:00" placeholder="00:00:00">
+                </div>
+                <div>
+                    <label style="font-size: 12px; color: #555;">End Time</label><br>
+                    <input type="text" id="endTime" placeholder="00:00:00">
+                </div>
+            </div>
+        </div>
+        <br>
+        
+        <label>Background Music (Optional):</label><br>
+        <input type="file" id="musicInput" accept="audio/*"><br>
+
+        <button class="btn process" id="processBtn">Process Video</button>
+        
+        <div id="progressContainer">
+            <progress id="progressBar" value="0" max="100"></progress>
+            <div id="status">Starting...</div>
+        </div>
+
+        <a id="downloadLink" href="#" style="text-decoration: none;">
+            <button class="btn download" id="downloadBtn">Download Processed Video</button>
+        </a>
+    </div>
+
+    <script>
+        const videoInput = document.getElementById('videoInput');
+        const trimControls = document.getElementById('trimControls');
+        const startTimeInput = document.getElementById('startTime');
+        const endTimeInput = document.getElementById('endTime');
+        
+        const processBtn = document.getElementById('processBtn');
+        const downloadBtn = document.getElementById('downloadBtn');
+        const statusText = document.getElementById('status');
+        const progressContainer = document.getElementById('progressContainer');
+        const progressBar = document.getElementById('progressBar');
+        const downloadLink = document.getElementById('downloadLink');
+
+        let pollInterval;
+
+        // Helper function to convert seconds to HH:MM:SS
+        function formatTime(totalSeconds) {
+            const hours = Math.floor(totalSeconds / 3600);
+            const minutes = Math.floor((totalSeconds % 3600) / 60);
+            const seconds = Math.floor(totalSeconds % 60);
+
+            // padStart adds a leading zero if the number is less than 10 (e.g., "5" becomes "05")
+            return [
+                hours.toString().padStart(2, '0'),
+                minutes.toString().padStart(2, '0'),
+                seconds.toString().padStart(2, '0')
+            ].join(':');
+        }
+
+        // Listen for video selection to set timestamps
+        videoInput.addEventListener('change', function() {
+            const file = this.files[0];
+            if (!file) {
+                trimControls.style.display = 'none';
+                return;
+            }
+
+            // Get video duration
+            const video = document.createElement('video');
+            video.preload = 'metadata';
+            video.onloadedmetadata = function() {
+                window.URL.revokeObjectURL(video.src); 
+                trimControls.style.display = 'block'; 
+                startTimeInput.value = "00:00:00";
+                
+                // Use our new function to format the duration
+                endTimeInput.value = formatTime(video.duration); 
+            }
+            video.src = URL.createObjectURL(file);
+        });
+
+        processBtn.onclick = async () => {
+            const videoFile = videoInput.files[0];
+            if (!videoFile) return alert("Please select a main video first!");
+
+            const formData = new FormData();
+            formData.append('video', videoFile);
+            
+            // Send the HH:MM:SS strings directly to the backend
+            formData.append('startTime', startTimeInput.value);
+            formData.append('endTime', endTimeInput.value);
+
+            const musicFile = document.getElementById('musicInput').files[0];
+            if (musicFile) formData.append('music', musicFile);
+
+            processBtn.disabled = true;
+            downloadBtn.style.display = "none";
+            progressContainer.style.display = "block";
+            progressBar.value = 0;
+            statusText.innerText = "Uploading to server...";
+            statusText.style.color = "black";
+
+            try {
+                const response = await fetch('/process-video', { method: 'POST', body: formData });
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    throw new Error(errorText || "Server failed to start job");
+                }
+                
+                const data = await response.json();
+                pollInterval = setInterval(() => checkProgress(data.jobId), 1000);
+
+            } catch (error) {
+                showError(`Failed: ${error.message}`);
+            }
+        };
+
+        async function checkProgress(jobId) {
+            try {
+                const response = await fetch(`/progress/${jobId}`);
+                const data = await response.json();
+
+                if (data.status === 'error') {
+                    clearInterval(pollInterval);
+                    showError(data.message);
+                } 
+                else if (data.status === 'completed') {
+                    clearInterval(pollInterval);
+                    progressBar.value = 100;
+                    statusText.innerText = "Processing Complete! Cache cleared.";
+                    statusText.style.color = "green";
+                    
+                    downloadLink.href = data.downloadUrl;
+                    downloadBtn.style.display = "block";
+                    processBtn.disabled = false;
+                } 
+                else {
+                    progressBar.value = data.percent;
+                    statusText.innerText = `Processing: ${data.percent}%`;
+                }
+            } catch (err) {
+                clearInterval(pollInterval);
+                showError("Lost connection to server");
+            }
+        }
+
+        function showError(msg) {
+            statusText.innerText = msg;
+            statusText.style.color = "red";
+            processBtn.disabled = false;
+        }
+    </script>
+</body>
+</html>
